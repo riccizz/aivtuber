@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIVtuber Control</title>
+  <link rel="stylesheet" href="/static/web_ui.css?v=20260321-runtime">
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>AIVtuber 本地控制台</h1>
+      <p>浏览器里直接进行本地交互。支持“模拟用户输入”和“直接命令 AI”两种模式，并实时查看最近收发记录。</p>
+    </section>
+    <section class="grid">
+      <div class="panel history-panel" id="historyPanel">
+        <div class="panel-head">
+          <h2>最近交互</h2>
+          <span id="eventCount">0 条</span>
+        </div>
+        <div class="panel-body">
+          <div class="feed" id="feed"></div>
+        </div>
+      </div>
+      <div class="side-stack" id="sideStack">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>发送输入</h2>
+            <span id="modeLabel">当前模式: user</span>
+          </div>
+          <div class="panel-body">
+            <div class="toolbar-row">
+              <div class="toolbar-label">当前人格</div>
+              <div class="persona-row" id="personaRow"></div>
+            </div>
+            <div class="mode-row">
+              <button class="mode-btn active" data-mode="user">模拟用户</button>
+              <button class="mode-btn" data-mode="cmd">直接指令</button>
+            </div>
+            <div class="init-banner" id="initBanner" hidden></div>
+            <textarea id="textInput" placeholder="输入内容后按回车发送，Shift+Enter 换行"></textarea>
+            <div class="hint" id="modeHint">`user` 模式会把输入当作观众/用户发言。</div>
+            <div class="actions">
+              <div class="status" id="statusText"></div>
+              <div class="action-buttons">
+                <button class="primary" id="sendBtn" type="button">发送</button>
+                <button class="danger" id="exitBtn" type="button">退出</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>运行配置</h2>
+            <span id="settingsHint">保存后立即生效</span>
+          </div>
+          <div class="panel-body">
+            <div class="settings-form" id="settingsForm"></div>
+            <div class="actions settings-actions">
+              <div class="status" id="settingsStatus"></div>
+              <div class="action-buttons">
+                <button class="primary" id="saveSettingsBtn" type="button">保存配置</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script src="/static/web_ui.js?v=20260321-runtime"></script>
+</body>
+</html>
