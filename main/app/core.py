@@ -59,6 +59,11 @@ class AIVtuberApp:
         self.is_ready = False
         self.init_error = ""
         self.runtime_started = False
+        self.runtime_ready = False
+        self.cosy_ready = False
+        self.cosy_loading = False
+        self.cosy_error = ""
+        self._cosy_init_thread: threading.Thread | None = None
 
         self.room_context: Deque[dict] = deque(maxlen=self.runtime.room_ctx_max)
         self.ui_events: Deque[dict] = deque(maxlen=60)
@@ -96,27 +101,95 @@ class AIVtuberApp:
         self.is_initializing = True
         self.is_ready = False
         self.init_error = ""
+        self.runtime_ready = False
         try:
             self.tts.cleanup_temp_audio()
             if self.runtime.voice_backend == "cosy":
                 self.tts.ensure_started()
-            self.tts.generate_wav(
+            warmup_wav = self.tts.generate_wav(
                 "鹭神启动",
                 retry_once=False,
                 timeout_s=60,
             )
+            if not warmup_wav:
+                raise RuntimeError("TTS 预热失败")
+            if self.runtime.voice_backend == "cosy":
+                self.cosy_ready = True
+                self.cosy_error = ""
             if not self.runtime_started:
                 threading.Thread(target=self.llm_worker_loop, daemon=True).start()
                 threading.Thread(target=self.tts_generate_loop, daemon=True).start()
                 threading.Thread(target=self.play_worker_loop, daemon=True).start()
                 threading.Thread(target=self.idle_llm_loop, daemon=True).start()
                 self.runtime_started = True
-            self.is_ready = True
+            self.runtime_ready = True
+            self._sync_input_gate()
+            if self.runtime.voice_backend != "cosy":
+                self._start_cosy_warmup(lock_input=False)
         except Exception as exc:
             self.init_error = str(exc)
             log.exception("runtime init failed: %s", exc)
         finally:
-            self.is_initializing = False
+            if not self.runtime_ready:
+                self.is_initializing = False
+
+    def _sync_input_gate(self) -> None:
+        if not self.runtime_ready:
+            self.is_ready = False
+            return
+
+        if self.runtime.voice_backend == "cosy":
+            if self.cosy_ready:
+                self.is_initializing = False
+                self.is_ready = True
+                self.init_error = ""
+            else:
+                self.is_initializing = self.cosy_loading
+                self.is_ready = False
+                self.init_error = self.cosy_error
+            return
+
+        self.is_initializing = False
+        self.is_ready = True
+        self.init_error = ""
+
+    def _start_cosy_warmup(self, *, lock_input: bool) -> None:
+        if self.cosy_ready:
+            self._sync_input_gate()
+            return
+        if self._cosy_init_thread and self._cosy_init_thread.is_alive():
+            if lock_input:
+                self._sync_input_gate()
+            return
+
+        self.cosy_loading = True
+        self.cosy_error = ""
+        if lock_input:
+            self._sync_input_gate()
+
+        def runner() -> None:
+            try:
+                self.tts.ensure_started()
+                warmup_wav = self.tts.generate_wav(
+                    "鹭神启动",
+                    retry_once=False,
+                    timeout_s=60,
+                )
+                if not warmup_wav:
+                    raise RuntimeError("CosyVoice 预热失败")
+                self.cosy_ready = True
+                self.cosy_error = ""
+                self.add_ui_event("system", "CosyVoice 初始化完成")
+            except Exception as exc:
+                self.cosy_ready = False
+                self.cosy_error = str(exc)
+                log.exception("cosy warmup failed: %s", exc)
+            finally:
+                self.cosy_loading = False
+                self._sync_input_gate()
+
+        self._cosy_init_thread = threading.Thread(target=runner, daemon=True)
+        self._cosy_init_thread.start()
 
     def _build_obs_client(self) -> ReqClient | None:
         if self.runtime.playback_backend != "obs":
@@ -186,6 +259,7 @@ class AIVtuberApp:
             or runtime.obs_password != self.runtime.obs_password
         )
         room_ctx_changed = runtime.room_ctx_max != self.runtime.room_ctx_max
+        out_dir_changed = runtime.out_dir != self.runtime.out_dir
         self.runtime = runtime
         self.config.runtime = runtime
         save_runtime_config(self.config.config_path, runtime)
@@ -199,6 +273,13 @@ class AIVtuberApp:
             self._update_room_context_limit(runtime.room_ctx_max)
         if obs_changed:
             self.ws = self._build_obs_client()
+        if out_dir_changed:
+            self.cosy_ready = False
+            self.cosy_error = ""
+        if not self.cosy_ready:
+            self._start_cosy_warmup(lock_input=(runtime.voice_backend == "cosy"))
+        else:
+            self._sync_input_gate()
 
     def _current_system_prompt(self, persona_key: str) -> str:
         self._refresh_system_prompt_if_needed(persona_key)
