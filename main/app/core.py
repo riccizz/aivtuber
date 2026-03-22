@@ -53,6 +53,7 @@ class AIVtuberApp:
         self.last_chat_ts = 0
         self.last_idle_ts = 0
         self.gen = 0
+        self.state_epoch = 0
         self.inflight = 0
         self.inflight_lock = threading.Lock()
         self.is_initializing = True
@@ -213,6 +214,9 @@ class AIVtuberApp:
     def _update_room_context_limit(self, maxlen: int) -> None:
         self.room_context = deque(list(self.room_context)[-maxlen:], maxlen=maxlen)
 
+    def _bump_state_epoch(self) -> None:
+        self.state_epoch += 1
+
     @staticmethod
     def _safe_mtime(path: str) -> float | None:
         try:
@@ -246,6 +250,7 @@ class AIVtuberApp:
 
     def update_runtime_settings(self, raw_runtime: dict) -> None:
         runtime = RuntimeConfig(**raw_runtime)
+        voice_changed = runtime.voice_choice != self.runtime.voice_choice
         obs_changed = (
             runtime.playback_backend != self.runtime.playback_backend
             or runtime.obs_host != self.runtime.obs_host
@@ -254,6 +259,8 @@ class AIVtuberApp:
         )
         room_ctx_changed = runtime.room_ctx_max != self.runtime.room_ctx_max
         out_dir_changed = runtime.out_dir != self.runtime.out_dir
+        if voice_changed:
+            self._bump_state_epoch()
         self.runtime = runtime
         self.config.runtime = runtime
         save_runtime_config(self.config.config_path, runtime)
@@ -280,6 +287,7 @@ class AIVtuberApp:
         return self.config.persona_system_prompts[persona_key]
 
     def _apply_persona_switch(self, persona_key: str) -> None:
+        self._bump_state_epoch()
         self.persona_key = persona_key
         self.persona = self.personas[persona_key]
         self.idle_scheduler.set_persona(self.persona)
@@ -385,8 +393,9 @@ class AIVtuberApp:
         if uname != IDLE_UNAME:
             self.gen += 1
         gen = self.gen
+        state_epoch = self.state_epoch
         context_snapshot = tuple(dict(msg) for msg in self.room_context)
-        item = (time.time(), gen, uname, user_text, self.persona_key, context_snapshot)
+        item = (time.time(), gen, state_epoch, uname, user_text, self.persona_key, context_snapshot)
         with self.in_queue.mutex:
             if self.in_queue.maxsize > 0 and len(self.in_queue.queue) >= self.in_queue.maxsize:
                 self.in_queue.queue.popleft()
@@ -429,8 +438,11 @@ class AIVtuberApp:
 
     def llm_worker_loop(self) -> None:
         while True:
-            ts, gen, uname, user_text, persona_key, context_snapshot = self.in_queue.get()
+            ts, gen, state_epoch, uname, user_text, persona_key, context_snapshot = self.in_queue.get()
             try:
+                if state_epoch != self.state_epoch:
+                    self._finish_item()
+                    continue
                 if uname != GIFT_UNAME:
                     if time.time() - ts > 60:
                         log.info("skipping stale item in llm_worker_loop: %s", user_text)
@@ -448,6 +460,9 @@ class AIVtuberApp:
                     )
                 except Exception as exc:
                     log.exception("deepseek error: %s", exc)
+                    self._finish_item()
+                    continue
+                if state_epoch != self.state_epoch:
                     self._finish_item()
                     continue
                 answer = answer.replace("\n", " ").strip()
@@ -470,7 +485,7 @@ class AIVtuberApp:
                 with self.llm_queue.mutex:
                     if self.llm_queue.maxsize > 0 and len(self.llm_queue.queue) >= self.llm_queue.maxsize:
                         self.llm_queue.queue.popleft()
-                    self.llm_queue.queue.append((ts, gen, uname, user_text, persona_key, spoken))
+                    self.llm_queue.queue.append((ts, gen, state_epoch, uname, user_text, persona_key, spoken))
                     self.llm_queue.unfinished_tasks += 1
                     self.llm_queue.not_empty.notify()
             finally:
@@ -478,8 +493,11 @@ class AIVtuberApp:
 
     def tts_generate_loop(self) -> None:
         while True:
-            ts, gen, uname, user_text, persona_key, spoken = self.llm_queue.get()
+            ts, gen, state_epoch, uname, user_text, persona_key, spoken = self.llm_queue.get()
             try:
+                if state_epoch != self.state_epoch:
+                    self._finish_item()
+                    continue
                 if uname == IDLE_UNAME and gen != self.gen:
                     self._finish_item()
                     continue
@@ -493,10 +511,13 @@ class AIVtuberApp:
                     log.error(self.tts.stderr_tail(200))
                     self._finish_item()
                     continue
+                if state_epoch != self.state_epoch:
+                    self._finish_item()
+                    continue
                 with self.play_queue.mutex:
                     if self.play_queue.maxsize > 0 and len(self.play_queue.queue) >= self.play_queue.maxsize:
                         self.play_queue.queue.popleft()
-                    self.play_queue.queue.append((ts, gen, uname, user_text, persona_key, wav_path))
+                    self.play_queue.queue.append((ts, gen, state_epoch, uname, user_text, persona_key, wav_path))
                     self.play_queue.unfinished_tasks += 1
                     self.play_queue.not_empty.notify()
             except Exception as exc:
@@ -506,8 +527,11 @@ class AIVtuberApp:
 
     def play_worker_loop(self) -> None:
         while True:
-            ts, gen, uname, user_text, persona_key, wav_path = self.play_queue.get()
+            ts, gen, state_epoch, uname, user_text, persona_key, wav_path = self.play_queue.get()
             try:
+                if state_epoch != self.state_epoch:
+                    self._finish_item()
+                    continue
                 if uname == IDLE_UNAME and gen != self.gen:
                     self._finish_item()
                     continue

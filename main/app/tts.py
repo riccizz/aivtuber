@@ -57,6 +57,7 @@ class CosyVoiceTTS:
 
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
+        self._ready_event = threading.Event()
 
         self._token_counter = 0
 
@@ -80,6 +81,19 @@ class CosyVoiceTTS:
         with self._lock:
             if self._proc is None or self._proc.poll() is not None:
                 self._start_locked()
+            proc = self._proc
+        if proc is None:
+            raise RuntimeError("CosyVoice worker not started")
+        if not self._ready_event.wait(timeout=self.tts_timeout_s):
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"CosyVoice worker exited before ready, code={proc.poll()}\n"
+                    f"stderr tail:\n{self.stderr_tail(120)}"
+                )
+            raise RuntimeError(
+                "CosyVoice worker start timed out before ready.\n"
+                f"stderr tail:\n{self.stderr_tail(120)}"
+            )
 
     def restart(self) -> None:
         """强制重启 worker。"""
@@ -265,6 +279,13 @@ class CosyVoiceTTS:
 
     def _start_locked(self) -> None:
         self._stderr_tail.clear()
+        self._ready_event.clear()
+        for stale_path in (self.done_path, self.done_tmp_path):
+            try:
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+            except OSError:
+                pass
 
         # stdout 丢弃；stderr 采集
         self._proc = subprocess.Popen(
@@ -280,7 +301,10 @@ class CosyVoiceTTS:
         def _stderr_reader(p: subprocess.Popen):
             assert p.stderr is not None
             for line in p.stderr:
-                self._stderr_tail.append(line.rstrip("\n"))
+                clean = line.rstrip("\n")
+                self._stderr_tail.append(clean)
+                if "[BOOT] model loaded, ready." in clean:
+                    self._ready_event.set()
 
         threading.Thread(target=_stderr_reader, args=(self._proc,), daemon=True).start()
 
@@ -309,6 +333,7 @@ class CosyVoiceTTS:
                 self._proc.kill()
 
         self._proc = None
+        self._ready_event.clear()
 
     def _send_text(self, text: str) -> None:
         self.ensure_started()
@@ -337,7 +362,8 @@ class CosyVoiceTTS:
             if cur and cur != prev:
                 # wav 轻量校验：存在 + 非空头（原子 replace 下足够稳）
                 try:
-                    if os.path.exists(self.wav_path) and os.path.getsize(self.wav_path) > 44:
+                    cur_wav_path = os.path.join(self.out_dir, f"{cur}.wav")
+                    if os.path.exists(cur_wav_path) and os.path.getsize(cur_wav_path) > 44:
                         return cur
                 except Exception:
                     pass

@@ -31,6 +31,16 @@ def atomic_write_text(path: str, tmp: str, text: str):
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
+    last_error = None
+    for _ in range(50):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.02)
+    if last_error is not None:
+        raise last_error
     os.replace(tmp, path)
 
 
