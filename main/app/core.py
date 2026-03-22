@@ -170,16 +170,10 @@ class AIVtuberApp:
         def runner() -> None:
             try:
                 self.tts.ensure_started()
-                warmup_wav = self.tts.generate_wav(
-                    "鹭神启动",
-                    retry_once=False,
-                    timeout_s=60,
-                )
-                if not warmup_wav:
-                    raise RuntimeError("CosyVoice 预热失败")
                 self.cosy_ready = True
                 self.cosy_error = ""
-                self.add_ui_event("system", "CosyVoice 初始化完成")
+                if lock_input:
+                    self.add_ui_event("system", "CosyVoice 初始化完成")
             except Exception as exc:
                 self.cosy_ready = False
                 self.cosy_error = str(exc)
